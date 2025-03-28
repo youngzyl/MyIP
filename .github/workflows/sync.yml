@@ -1,41 +1,100 @@
-name: Upstream Sync
-
-permissions:
-  contents: write
+name: Sync Fork and Rename Folder
 
 on:
   schedule:
-    - cron: "0 0 * * *" # 每天 UTC 时间 0 点
-  workflow_dispatch:
+    - cron: '0 * * * *' # Example: Run every hour
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
-  sync_latest_from_upstream:
-    name: Sync latest commits from upstream repo
+  sync_and_rename:
+    name: Sync upstream and rename folder
     runs-on: ubuntu-latest
-    if: ${{ github.event.repository.fork }}
+    # Optional: Keep the condition if you only want this for forks,
+    # but often sync workflows run on the fork itself regularly.
+    # if: ${{ github.event.repository.fork }}
 
     steps:
-      # 步骤 1: 运行标准的签出动作
-      - name: Checkout target repo
-        uses: actions/checkout@v3
+      # Step 1: Checkout your fork's code initially
+      # This step might be optional depending on how the sync action works internally,
+      # but it's good practice. Provide a token for the push later.
+      - name: Checkout target repo (initial)
+        uses: actions/checkout@v4 # Use latest version
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main # Explicitly checkout the branch you will sync and modify
 
-      # 步骤 2: 运行同步动作
+      # Step 2: Run the sync action
+      # This action fetches from upstream and pushes changes directly to your fork's 'main' branch.
       - name: Sync upstream changes
         id: sync
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
+          upstream_repo: jason5ng32/MyIP # Renamed parameter in newer versions? Check action docs. Using upstream_sync_repo as per your original.
+          upstream_branch: main
+          target_branch: main # Renamed parameter? Check action docs. Using target_sync_branch as per your original.
+          # Parameters based on your original workflow:
           upstream_sync_repo: jason5ng32/MyIP
           upstream_sync_branch: main
           target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }} # 自动生成，无需设置
-
-          # 将 test_mode 设置为 true 来运行测试而不是真正的动作！
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
           test_mode: false
 
-      # 出错检查
-      - name: Sync check
-        if: failure()
+      # Step 3: Checkout the branch AGAIN after sync
+      # This is crucial to get the latest code *pushed* by the sync action into the runner's workspace.
+      - name: Checkout target repo (post-sync)
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main # Ensure you check out the branch that was just updated
+
+      # Step 4: Rename the specific folder
+      - name: Rename specific folder
+        id: rename_folder
         run: |
-          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次。"
-          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork."
+          OLD_FOLDER_PATH=""  # <<< --- IMPORTANT: Replace with the actual path to the folder you want to rename
+          NEW_FOLDER_PATH=""  # <<< --- IMPORTANT: Replace with the desired new path/name
+
+          if [ -d "$OLD_FOLDER_PATH" ]; then
+            echo "Folder '$OLD_FOLDER_PATH' found. Attempting to rename to '$NEW_FOLDER_PATH'."
+            # Check if the new path already exists (optional, git mv might handle this)
+            if [ -e "$NEW_FOLDER_PATH" ]; then
+              echo "Warning: Target path '$NEW_FOLDER_PATH' already exists. Skipping rename."
+              echo "renamed=false" >> $GITHUB_OUTPUT
+            else
+              # Perform the rename using Git
+              git mv "$OLD_FOLDER_PATH" "$NEW_FOLDER_PATH"
+              echo "Folder renamed successfully."
+              echo "renamed=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Folder '$OLD_FOLDER_PATH' not found. Skipping rename."
+            echo "renamed=false" >> $GITHUB_OUTPUT
+          fi
+        # Continue even if rename fails or is skipped, but the next step depends on the output
+        continue-on-error: false # Set to true if you want the workflow to proceed even if git mv fails
+
+      # Step 5: Commit and push the rename if it happened
+      - name: Commit and Push Rename
+        # Only run this step if the 'rename_folder' step successfully set 'renamed' to 'true'
+        if: steps.rename_folder.outputs.renamed == 'true'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # Check if there are staged changes (the rename)
+          if ! git diff --staged --quiet; then
+            echo "Committing and pushing the folder rename..."
+            git commit -m "chore: Rename folder after upstream sync" # Customize your commit message
+            git push origin main # Push to the 'main' branch (or target_sync_branch)
+          else
+            echo "No staged changes detected from rename operation. Nothing to commit or push."
+          fi
+
+      # Step 6: Your original error check for the sync step itself
+      - name: Sync Check (Failure Handling)
+        # This condition should ideally check the outcome of the sync step specifically
+        if: steps.sync.outcome == 'failure'
+        run: |
+          echo "[Error] The upstream sync step failed. This might be due to upstream workflow changes or other conflicts."
+          echo "[Error] Please check the logs for the 'Sync upstream changes' step and consider a manual sync if needed."
           exit 1
